@@ -13,6 +13,7 @@ node_modules/
 
 # Firebase credentials
 *-firebase-adminsdk-*.json
+src/mipripityweb-firebase-adminsdk-fbsvc-75706ecf54.json
 
 # Build outputs
 /build
