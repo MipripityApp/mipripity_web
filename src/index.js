@@ -6,7 +6,7 @@
  */
 
 // Import server configuration
-const app = require("./mipripity/src/backend/server")
+const app = require("./backend/server")
 
 // Server is already configured to listen on the specified port in server.js
 console.log("Server is configured and imported from src/backend/server.js")
