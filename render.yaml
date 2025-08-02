@@ -1,0 +1,62 @@
+services:
+  # Web service for the backend API
+  - type: web
+    name: mipripity-web
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    region: oregon  # You can change this to your preferred region
+    plan: starter    # Free tier
+    branch: main    # Deploy from the main branch
+    numInstances: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      # Database connection variables - use render dashboard to set these securely
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      # Firebase config - use render dashboard to set these securely
+      - key: FIREBASE_TYPE
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_AUTH_URI
+        sync: false
+      - key: FIREBASE_TOKEN_URI
+        sync: false
+      - key: FIREBASE_AUTH_PROVIDER_X509_CERT_URL
+        sync: false
+      - key: FIREBASE_CLIENT_X509_CERT_URL
+        sync: false
+
+  # Define database service if you want Render to create it for you
+  # Otherwise, you can create a PostgreSQL database manually in Render dashboard
+  # and set the connection details in environment variables
+  - type: pserv
+    name: mipripity-db
+    plan: starter
+    region: oregon
+    env: postgresql
+    disk:
+      name: data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 10
