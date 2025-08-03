@@ -59,7 +59,7 @@ app.get("/health", (req, res) => {
 // Simple API documentation endpoint
 app.get("/", (req, res) => {
   res.json({
-    message: "🏠 Mipripity Web API Server",
+    message: "🏠 Mipripity Web API Server is running",
     status: "✅ API Server is running successfully",
     description: "Backend API server for the Mipripity property voting platform",
     endpoints: {
