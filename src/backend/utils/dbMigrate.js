@@ -46,7 +46,7 @@ const recordMigration = async (client, filename) => {
  */
 const checkMigrationsNeeded = async () => {
   try {
-    const client = await db.getClient();
+    const client = await db.pool.connect(); // Use db.pool.connect() instead
     
     try {
       // Create migrations table if it doesn't exist
@@ -86,7 +86,7 @@ const runMigrations = async () => {
     }
     
     // Get a client for transaction
-    const client = await db.getClient();
+    const client = await db.pool.connect(); // Use db.pool.connect() instead
     
     try {
       // Start transaction
@@ -158,7 +158,7 @@ const forceRunMigrations = async () => {
       throw new Error("Migration file not found");
     }
     
-    const client = await db.getClient();
+    const client = await db.pool.connect(); // Use db.pool.connect() instead
     
     try {
       await client.query('BEGIN');
