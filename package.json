@@ -2,17 +2,19 @@
   "name": "mipripity-web",
   "version": "1.0.0",
   "description": "Mipripity Web Application - Property voting and management platform",
-  "main": "src/index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "build": "mkdir -p build && echo '<!DOCTYPE html><html><head><title>Mipripity Web</title></head><body><div id=\"root\"><h1>Mipripity Web API Server</h1><p>The API server is running. Frontend will be implemented later.</p></div></body></html>' > build/index.html",
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "mkdir -p build && echo '<!DOCTYPE html><html><head><title>Mipripity Web API</title><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>body{font-family:Arial,sans-serif;max-width:800px;margin:50px auto;padding:20px;background:#f5f5f5}.container{background:white;padding:30px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}h1{color:#333;border-bottom:2px solid #007bff;padding-bottom:10px}p{color:#666;line-height:1.6}.status{background:#d4edda;color:#155724;padding:10px;border-radius:4px;margin:20px 0}.endpoint{background:#f8f9fa;padding:15px;border-left:4px solid #007bff;margin:10px 0;border-radius:4px}</style></head><body><div class=\"container\"><h1>🏠 Mipripity Web API Server</h1><div class=\"status\">✅ API Server is running successfully</div><p>This is the backend API server for the Mipripity property voting platform. The server provides REST API endpoints for user management, property listings, and voting functionality.</p><div class=\"endpoint\"><strong>Health Check:</strong> <code>GET /health</code></div><div class=\"endpoint\"><strong>Users API:</strong> <code>GET /api/users</code></div><div class=\"endpoint\"><strong>Properties API:</strong> <code>GET /api/properties</code></div><div class=\"endpoint\"><strong>Votes API:</strong> <code>GET /api/votes</code></div><div class=\"endpoint\"><strong>Auth API:</strong> <code>POST /api/auth</code></div><p>Frontend interface will be integrated soon. For API documentation and testing, please refer to the project repository.</p></div></body></html>' > build/index.html",
     "postinstall": "npm run build",
     "deploy": "npm run build && npm start",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "migrate": "node -e \"require('./utils/dbMigrate').runMigrations().then(() => console.log('Migrations completed')).catch(err => {console.error('Migration failed:', err); process.exit(1);})\""
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
   },
   "repository": {
     "type": "git",
@@ -23,7 +25,9 @@
     "voting",
     "real-estate",
     "express",
-    "react"
+    "react",
+    "nodejs",
+    "postgresql"
   ],
   "author": "Mipripity Team",
   "license": "ISC",
