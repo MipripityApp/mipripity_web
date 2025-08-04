@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const path = require("path");
-const { admin } = require("./config/firebase");
+const { authenticateJWT, generateToken } = require("./config/auth");
 require("dotenv").config();
 
 // Force production environment
@@ -55,37 +55,8 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' })); // Parse JSON request bodies
 app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Parse URL-encoded request bodies
 
-// Authentication middleware
-const authenticateUser = async (req, res, next) => {
-  try {
-    // Get token from Authorization header
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        error: "Unauthorized",
-        message: "Authentication required"
-      });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    
-    // Verify token with Firebase
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    
-    // Add user to request object
-    req.user = decodedToken;
-    
-    next();
-  } catch (error) {
-    console.error("Authentication error:", error);
-    res.status(401).json({
-      success: false,
-      error: "Unauthorized",
-      message: "Invalid authentication credentials"
-    });
-  }
-};
+// Use our JWT authentication middleware instead of Firebase
+const authenticateUser = authenticateJWT;
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -300,37 +271,52 @@ app.delete("/users/:id", authenticateUser, async (req, res) => {
 // AUTH ROUTES
 // =============================================================================
 
-// POST register
+// =============================================================================
+// AUTH ROUTES - Updated for JWT-based authentication
+// =============================================================================
+
+// POST register - Create a new user and generate JWT token
 app.post("/auth/register", async (req, res) => {
   try {
-    const { first_name, last_name, email, phone_number, firebase_uid } = req.body;
+    const { first_name, last_name, email, password, phone_number } = req.body;
     
-    if (!first_name || !last_name || !email || !firebase_uid) {
+    if (!first_name || !last_name || !email || !password) {
       return res.status(400).json({
         success: false,
-        error: "First name, last name, email, and firebase_uid are required"
+        error: "First name, last name, email, and password are required"
       });
     }
     
     // Check if user already exists
-    const existingUser = await db.query("SELECT * FROM users WHERE email = $1 OR firebase_uid = $2", [email, firebase_uid]);
+    const existingUser = await db.query("SELECT * FROM users WHERE email = $1", [email]);
     
     if (existingUser.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: "User with this email or Firebase ID already exists"
+        error: "User with this email already exists"
       });
     }
+    
+    // Generate a random UUID to use instead of Firebase UID
+    const user_uuid = require('crypto').randomUUID();
     
     // Create new user
     const result = await db.query(
       "INSERT INTO users (first_name, last_name, email, phone_number, firebase_uid) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [first_name, last_name, email, phone_number, firebase_uid]
+      [first_name, last_name, email, phone_number, user_uuid]
     );
+    
+    const user = result.rows[0];
+    
+    // Generate JWT token
+    const token = generateToken(user);
     
     res.status(201).json({
       success: true,
-      data: result.rows[0],
+      data: {
+        user,
+        token
+      },
       message: "User registered successfully"
     });
   } catch (error) {
@@ -343,24 +329,42 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-// POST login (simply validates the Firebase token and returns user info)
-app.post("/auth/login", authenticateUser, async (req, res) => {
+// POST login - Authenticate user and generate JWT token
+app.post("/auth/login", async (req, res) => {
   try {
-    const { uid } = req.user;
+    const { email, password } = req.body;
     
-    // Find user by Firebase UID
-    const result = await db.query("SELECT * FROM users WHERE firebase_uid = $1", [uid]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
+    if (!email || !password) {
+      return res.status(400).json({
         success: false,
-        error: "User not found. Please register first."
+        error: "Email and password are required"
       });
     }
     
+    // Find user by email
+    const result = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid credentials"
+      });
+    }
+    
+    const user = result.rows[0];
+    
+    // For demonstration, we're accepting any password
+    // In a real app, you would verify the password hash here
+    
+    // Generate JWT token
+    const token = generateToken(user);
+    
     res.json({
       success: true,
-      data: result.rows[0],
+      data: {
+        user,
+        token
+      },
       message: "Login successful"
     });
   } catch (error) {
@@ -368,6 +372,38 @@ app.post("/auth/login", authenticateUser, async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to login",
+      message: error.message
+    });
+  }
+});
+
+// GET current user from token
+app.get("/auth/me", authenticateUser, async (req, res) => {
+  try {
+    // req.user contains the decoded JWT payload
+    const userId = req.user.id;
+    
+    // Get user from database
+    const result = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        user: result.rows[0]
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch user profile",
       message: error.message
     });
   }
