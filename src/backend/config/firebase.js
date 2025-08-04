@@ -1,5 +1,5 @@
-const admin = require("firebase-admin")
-require("dotenv").config()
+const admin = require("firebase-admin");
+require("dotenv").config();
 
 // Firebase configuration for client-side usage
 const firebaseConfig = {
@@ -10,69 +10,28 @@ const firebaseConfig = {
   messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.FIREBASE_APP_ID,
   measurementId: process.env.FIREBASE_MEASUREMENT_ID,
-}
+};
 
-// Initialize Firebase Admin SDK using the FIREBASE_CONFIG environment variable
+// Initialize Firebase Admin SDK - using simpler approach with Google Application Default Credentials
 if (!admin.apps.length) {
   try {
-    // Parse the FIREBASE_CONFIG JSON string
-    let serviceAccount
-
-    // Check if FIREBASE_CONFIG is provided as a JSON string
-    if (process.env.FIREBASE_CONFIG) {
-      try {
-        serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG)
-        console.log("Successfully parsed FIREBASE_CONFIG JSON")
-      } catch (parseError) {
-        console.error("Error parsing FIREBASE_CONFIG JSON:", parseError.message)
-        // Fallback to individual environment variables
-        serviceAccount = null
-      }
-    }
-
-    // If JSON parsing failed or FIREBASE_CONFIG not provided, use individual environment variables
-    if (!serviceAccount) {
-      console.log("Using individual Firebase environment variables")
-      serviceAccount = {
-        type: process.env.FIREBASE_TYPE || "service_account",
-        project_id: process.env.FIREBASE_PROJECT_ID,
-        private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-        private_key: process.env.FIREBASE_PRIVATE_KEY,
-        client_email: process.env.FIREBASE_CLIENT_EMAIL,
-        client_id: process.env.FIREBASE_CLIENT_ID,
-        auth_uri: process.env.FIREBASE_AUTH_URI,
-        token_uri: process.env.FIREBASE_TOKEN_URI,
-        auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
-        client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
-      }
-    }
-
-    // Fix the private key formatting - handle different possible formats
-    if (serviceAccount.private_key) {
-      // If private key is wrapped in quotes, remove them
-      if (serviceAccount.private_key.startsWith('"') && serviceAccount.private_key.endsWith('"')) {
-        serviceAccount.private_key = serviceAccount.private_key.slice(1, -1)
-      }
-      
-      // Replace \\n with actual newlines
-      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n")
-    } else {
-      console.error("Missing private key in Firebase configuration")
-    }
-
+    // For deployment on Render, we'll use a simple initialization with just the project ID
+    // This works when the Firebase project's public access is enabled for token verification
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`,
-    })
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      // Note: For Render deployment, either:
+      // 1. Add the GOOGLE_APPLICATION_CREDENTIALS env var pointing to a service account key
+      // 2. Or rely on the simplified token verification which works for many Firebase services
+    });
 
-    console.log("Firebase Admin SDK initialized successfully")
+    console.log("Firebase Admin SDK initialized successfully");
+    console.log(`Using Firebase project: ${process.env.FIREBASE_PROJECT_ID}`);
   } catch (error) {
-    console.error("Error initializing Firebase Admin SDK:", error)
-    console.error("FIREBASE_CONFIG content:", process.env.FIREBASE_CONFIG ? "Present" : "Missing")
+    console.error("Error initializing Firebase Admin SDK:", error);
   }
 }
 
 module.exports = {
   admin,
   firebaseConfig,
-}
+};

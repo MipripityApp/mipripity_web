@@ -1,51 +1,91 @@
-const express = require("express")
-const cors = require("cors")
-const helmet = require("helmet")
-const path = require("path")
-require("dotenv").config()
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const path = require("path");
+const { admin } = require("./config/firebase");
+require("dotenv").config();
 
 // Force production environment
-process.env.NODE_ENV = 'production'
+process.env.NODE_ENV = 'production';
 
 // Import database configuration
-const db = require("./config/db")
+const db = require("./config/db");
+
+// Import route modules
+const propertyImagesRouter = require("./models/property_images");
 
 // Create Express app
-const app = express()
-const PORT = process.env.PORT || 3000
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Skip migrations for now to avoid errors - we'll handle them separately
-console.log("Skipping migrations on startup to avoid errors")
+console.log("Skipping migrations on startup to avoid errors");
 
 // Middleware
-app.use(helmet()) // Security headers
+app.use(helmet()); // Security headers
 
 // Configure CORS for Netlify frontend
 const allowedOrigins = [
-  'https://688cf92ccb2b7f2e7181e641--mipripity.netlify.app', // Your Netlify frontend
-  'https://mipripity.netlify.app', // In case you get a custom domain
-  process.env.FRONTEND_URL
-].filter(Boolean)
+  'https://688cf92ccb2b7f2e7181e641--mipripity.netlify.app',
+  'https://mipripity.netlify.app',
+  process.env.FRONTEND_URL,
+  // Allow local development
+  'http://localhost:3000',
+  'http://localhost:8000',
+  'http://localhost:8080'
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true)
+    if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true)
+      callback(null, true);
     } else {
-      console.log('CORS blocked origin:', origin)
-      callback(new Error('Not allowed by CORS'))
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
   credentials: true
-}))
+}));
 
-app.use(express.json({ limit: '10mb' })) // Parse JSON request bodies
-app.use(express.urlencoded({ extended: true, limit: '10mb' })) // Parse URL-encoded request bodies
+app.use(express.json({ limit: '10mb' })); // Parse JSON request bodies
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Parse URL-encoded request bodies
+
+// Authentication middleware
+const authenticateUser = async (req, res, next) => {
+  try {
+    // Get token from Authorization header
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized",
+        message: "Authentication required"
+      });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    
+    // Verify token with Firebase
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    
+    // Add user to request object
+    req.user = decodedToken;
+    
+    next();
+  } catch (error) {
+    console.error("Authentication error:", error);
+    res.status(401).json({
+      success: false,
+      error: "Unauthorized",
+      message: "Invalid authentication credentials"
+    });
+  }
+};
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -54,8 +94,8 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || "production",
     database: "connected"
-  })
-})
+  });
+});
 
 // Simple API documentation endpoint
 app.get("/", (req, res) => {
@@ -74,8 +114,8 @@ app.get("/", (req, res) => {
       auth: "POST /auth/login, POST /auth/register"
     },
     frontend: "Frontend hosted separately on Netlify"
-  })
-})
+  });
+});
 
 // =============================================================================
 // USERS ROUTES
@@ -84,114 +124,681 @@ app.get("/", (req, res) => {
 // GET all users
 app.get("/users", async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM users ORDER BY created_at DESC")
+    const result = await db.query("SELECT * FROM users ORDER BY created_at DESC");
     res.json({
       success: true,
       data: result.rows,
       count: result.rows.length
-    })
+    });
   } catch (error) {
-    console.error("Error during login:", error)
+    console.error("Error fetching users:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to login",
+      error: "Failed to fetch users",
       message: error.message
-    })
+    });
   }
-})
+});
+
+// GET user by ID
+app.get("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query("SELECT * FROM users WHERE id = $1", [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error("Error fetching user:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch user",
+      message: error.message
+    });
+  }
+});
+
+// POST create new user
+app.post("/users", async (req, res) => {
+  try {
+    const { first_name, last_name, email, phone_number, firebase_uid } = req.body;
+    
+    if (!first_name || !last_name || !email || !firebase_uid) {
+      return res.status(400).json({
+        success: false,
+        error: "First name, last name, email, and firebase_uid are required"
+      });
+    }
+    
+    const result = await db.query(
+      "INSERT INTO users (first_name, last_name, email, phone_number, firebase_uid) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+      [first_name, last_name, email, phone_number, firebase_uid]
+    );
+    
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message: "User created successfully"
+    });
+  } catch (error) {
+    console.error("Error creating user:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to create user",
+      message: error.message
+    });
+  }
+});
+
+// PUT/PATCH update user
+app.put("/users/:id", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { first_name, last_name, email, phone_number, profile_picture } = req.body;
+    
+    const result = await db.query(
+      "UPDATE users SET first_name = COALESCE($1, first_name), last_name = COALESCE($2, last_name), email = COALESCE($3, email), phone_number = COALESCE($4, phone_number), profile_picture = COALESCE($5, profile_picture), updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *",
+      [first_name, last_name, email, phone_number, profile_picture, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "User updated successfully"
+    });
+  } catch (error) {
+    console.error("Error updating user:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update user",
+      message: error.message
+    });
+  }
+});
+
+app.patch("/users/:id", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    
+    const setClause = Object.keys(updates).map((key, index) => `${key} = $${index + 1}`).join(', ');
+    const values = Object.values(updates);
+    values.push(id);
+    
+    const query = `UPDATE users SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING *`;
+    
+    const result = await db.query(query, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "User updated successfully"
+    });
+  } catch (error) {
+    console.error("Error updating user:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update user",
+      message: error.message
+    });
+  }
+});
+
+// DELETE user
+app.delete("/users/:id", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await db.query("DELETE FROM users WHERE id = $1 RETURNING *", [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "User deleted successfully"
+    });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to delete user",
+      message: error.message
+    });
+  }
+});
+
+// =============================================================================
+// AUTH ROUTES
+// =============================================================================
 
 // POST register
 app.post("/auth/register", async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body
+    const { first_name, last_name, email, phone_number, firebase_uid } = req.body;
     
-    if (!name || !email || !password) {
+    if (!first_name || !last_name || !email || !firebase_uid) {
       return res.status(400).json({
         success: false,
-        error: "Name, email, and password are required"
-      })
+        error: "First name, last name, email, and firebase_uid are required"
+      });
     }
     
     // Check if user already exists
-    const existingUser = await db.query("SELECT * FROM users WHERE email = $1", [email])
+    const existingUser = await db.query("SELECT * FROM users WHERE email = $1 OR firebase_uid = $2", [email, firebase_uid]);
     
     if (existingUser.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: "User with this email already exists"
-      })
+        error: "User with this email or Firebase ID already exists"
+      });
     }
     
     // Create new user
     const result = await db.query(
-      "INSERT INTO users (name, email, password, phone) VALUES ($1, $2, $3, $4) RETURNING *",
-      [name, email, password, phone]
-    )
-    
-    // Remove password from response
-    const { password: _, ...userWithoutPassword } = result.rows[0]
+      "INSERT INTO users (first_name, last_name, email, phone_number, firebase_uid) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+      [first_name, last_name, email, phone_number, firebase_uid]
+    );
     
     res.status(201).json({
       success: true,
-      data: userWithoutPassword,
+      data: result.rows[0],
       message: "User registered successfully"
-    })
+    });
   } catch (error) {
-    console.error("Error during registration:", error)
+    console.error("Error during registration:", error);
     res.status(500).json({
       success: false,
       error: "Failed to register user",
       message: error.message
-    })
+    });
   }
-})
+});
+
+// POST login (simply validates the Firebase token and returns user info)
+app.post("/auth/login", authenticateUser, async (req, res) => {
+  try {
+    const { uid } = req.user;
+    
+    // Find user by Firebase UID
+    const result = await db.query("SELECT * FROM users WHERE firebase_uid = $1", [uid]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found. Please register first."
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "Login successful"
+    });
+  } catch (error) {
+    console.error("Error during login:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to login",
+      message: error.message
+    });
+  }
+});
 
 // =============================================================================
-// ADDITIONAL API ROUTES WITH /api PREFIX
+// PROPERTIES ROUTES
 // =============================================================================
 
-// Add /api prefix routes for all endpoints
-app.use("/api/users", (req, res, next) => {
-  req.url = req.url.replace('/api/users', '/users')
-  req.originalUrl = req.originalUrl.replace('/api/users', '/users')
-  next()
-})
+// GET all properties
+app.get("/properties", async (req, res) => {
+  try {
+    // Get query parameters for filtering
+    const { category, user_id, limit = 100, offset = 0 } = req.query;
+    
+    let query = `
+      SELECT p.*, 
+             u.first_name || ' ' || u.last_name as owner_name, 
+             c.name as category_name,
+             (SELECT COUNT(*) FROM votes WHERE property_id = p.id) as vote_count
+      FROM properties p 
+      LEFT JOIN users u ON p.user_id = u.id 
+      LEFT JOIN categories c ON p.category_id = c.id 
+      WHERE 1=1
+    `;
+    
+    const queryParams = [];
+    let paramIndex = 1;
+    
+    // Add filters if provided
+    if (category) {
+      query += ` AND c.name = $${paramIndex}`;
+      queryParams.push(category);
+      paramIndex++;
+    }
+    
+    if (user_id) {
+      query += ` AND p.user_id = $${paramIndex}`;
+      queryParams.push(user_id);
+      paramIndex++;
+    }
+    
+    // Add pagination
+    query += ` ORDER BY p.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    queryParams.push(limit, offset);
+    
+    const result = await db.query(query, queryParams);
+    
+    // Get images for each property
+    const properties = result.rows;
+    for (const property of properties) {
+      const imagesResult = await db.query(
+        "SELECT * FROM property_images WHERE property_id = $1 ORDER BY is_primary DESC, created_at ASC",
+        [property.id]
+      );
+      property.images = imagesResult.rows;
+    }
+    
+    res.json({
+      success: true,
+      data: properties,
+      count: properties.length,
+      total: parseInt((await db.query("SELECT COUNT(*) FROM properties")).rows[0].count)
+    });
+  } catch (error) {
+    console.error("Error fetching properties:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch properties",
+      message: error.message
+    });
+  }
+});
 
-app.use("/api/properties", (req, res, next) => {
-  req.url = req.url.replace('/api/properties', '/properties')
-  req.originalUrl = req.originalUrl.replace('/api/properties', '/properties')
-  next()
-})
+// GET property by ID
+app.get("/properties/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(`
+      SELECT p.*, 
+             u.first_name || ' ' || u.last_name as owner_name,
+             u.email as owner_email,
+             u.phone_number as owner_phone,
+             c.name as category_name
+      FROM properties p 
+      LEFT JOIN users u ON p.user_id = u.id 
+      LEFT JOIN categories c ON p.category_id = c.id 
+      WHERE p.id = $1
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Property not found"
+      });
+    }
+    
+    // Get images for the property
+    const property = result.rows[0];
+    const imagesResult = await db.query(
+      "SELECT * FROM property_images WHERE property_id = $1 ORDER BY is_primary DESC, created_at ASC",
+      [id]
+    );
+    property.images = imagesResult.rows;
+    
+    // Get vote options for this property's category
+    const voteOptionsResult = await db.query(
+      "SELECT * FROM vote_options WHERE category_id = $1 ORDER BY name ASC",
+      [property.category_id]
+    );
+    property.vote_options = voteOptionsResult.rows;
+    
+    res.json({
+      success: true,
+      data: property
+    });
+  } catch (error) {
+    console.error("Error fetching property:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch property",
+      message: error.message
+    });
+  }
+});
 
-app.use("/api/votes", (req, res, next) => {
-  req.url = req.url.replace('/api/votes', '/votes')
-  req.originalUrl = req.originalUrl.replace('/api/votes', '/votes')
-  next()
-})
+// POST create new property
+app.post("/properties", authenticateUser, async (req, res) => {
+  try {
+    const { 
+      title, 
+      description, 
+      location, 
+      category_id, 
+      current_worth,
+      year_of_construction
+    } = req.body;
+    
+    // Get user_id from Firebase UID
+    const userResult = await db.query(
+      "SELECT id FROM users WHERE firebase_uid = $1",
+      [req.user.uid]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found. Please register first."
+      });
+    }
+    
+    const user_id = userResult.rows[0].id;
+    
+    if (!title || !description || !location || !category_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Title, description, location, and category_id are required"
+      });
+    }
+    
+    const result = await db.query(
+      "INSERT INTO properties (title, description, location, user_id, category_id, current_worth, year_of_construction) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+      [title, description, location, user_id, category_id, current_worth, year_of_construction]
+    );
+    
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message: "Property created successfully"
+    });
+  } catch (error) {
+    console.error("Error creating property:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to create property",
+      message: error.message
+    });
+  }
+});
 
-app.use("/api/property_images", (req, res, next) => {
-  req.url = req.url.replace('/api/property_images', '/property_images')
-  req.originalUrl = req.originalUrl.replace('/api/property_images', '/property_images')
-  next()
-})
+// PUT update property
+app.put("/properties/:id", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, location, category_id, current_worth, year_of_construction } = req.body;
+    
+    // Verify ownership
+    const ownershipCheck = await db.query(
+      "SELECT p.* FROM properties p JOIN users u ON p.user_id = u.id WHERE p.id = $1 AND u.firebase_uid = $2",
+      [id, req.user.uid]
+    );
+    
+    if (ownershipCheck.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden",
+        message: "You don't have permission to update this property"
+      });
+    }
+    
+    const result = await db.query(
+      "UPDATE properties SET title = COALESCE($1, title), description = COALESCE($2, description), location = COALESCE($3, location), category_id = COALESCE($4, category_id), current_worth = COALESCE($5, current_worth), year_of_construction = COALESCE($6, year_of_construction), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *",
+      [title, description, location, category_id, current_worth, year_of_construction, id]
+    );
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "Property updated successfully"
+    });
+  } catch (error) {
+    console.error("Error updating property:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update property",
+      message: error.message
+    });
+  }
+});
 
-app.use("/api/categories", (req, res, next) => {
-  req.url = req.url.replace('/api/categories', '/categories')
-  req.originalUrl = req.originalUrl.replace('/api/categories', '/categories')
-  next()
-})
+// DELETE property
+app.delete("/properties/:id", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verify ownership
+    const ownershipCheck = await db.query(
+      "SELECT p.* FROM properties p JOIN users u ON p.user_id = u.id WHERE p.id = $1 AND u.firebase_uid = $2",
+      [id, req.user.uid]
+    );
+    
+    if (ownershipCheck.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden",
+        message: "You don't have permission to delete this property"
+      });
+    }
+    
+    const result = await db.query("DELETE FROM properties WHERE id = $1 RETURNING *", [id]);
+    
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: "Property deleted successfully"
+    });
+  } catch (error) {
+    console.error("Error deleting property:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to delete property",
+      message: error.message
+    });
+  }
+});
 
-app.use("/api/vote_options", (req, res, next) => {
-  req.url = req.url.replace('/api/vote_options', '/vote_options')
-  req.originalUrl = req.originalUrl.replace('/api/vote_options', '/vote_options')
-  next()
-})
+// =============================================================================
+// VOTES ROUTES
+// =============================================================================
 
-app.use("/api/auth", (req, res, next) => {
-  req.url = req.url.replace('/api/auth', '/auth')
-  req.originalUrl = req.originalUrl.replace('/api/auth', '/auth')
-  next()
-})
+// GET all votes
+app.get("/votes", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT v.*, 
+             u.first_name || ' ' || u.last_name as voter_name, 
+             p.title as property_title, 
+             vo.name as vote_option_name 
+      FROM votes v 
+      LEFT JOIN users u ON v.user_id = u.id 
+      LEFT JOIN properties p ON v.property_id = p.id 
+      LEFT JOIN vote_options vo ON v.vote_option_id = vo.id 
+      ORDER BY v.created_at DESC
+    `);
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    console.error("Error fetching votes:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch votes",
+      message: error.message
+    });
+  }
+});
+
+// GET votes by property ID
+app.get("/votes/property/:propertyId", async (req, res) => {
+  try {
+    const { propertyId } = req.params;
+    const result = await db.query(`
+      SELECT v.*, 
+             u.first_name || ' ' || u.last_name as voter_name, 
+             vo.name as vote_option_name 
+      FROM votes v 
+      LEFT JOIN users u ON v.user_id = u.id 
+      LEFT JOIN vote_options vo ON v.vote_option_id = vo.id 
+      WHERE v.property_id = $1 
+      ORDER BY v.created_at DESC
+    `, [propertyId]);
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    console.error("Error fetching votes for property:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch votes for property",
+      message: error.message
+    });
+  }
+});
+
+// POST create new vote
+app.post("/votes", authenticateUser, async (req, res) => {
+  try {
+    const { property_id, vote_option_id } = req.body;
+    
+    if (!property_id || !vote_option_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Property ID and vote option ID are required"
+      });
+    }
+    
+    // Get user_id from Firebase UID
+    const userResult = await db.query(
+      "SELECT id FROM users WHERE firebase_uid = $1",
+      [req.user.uid]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found. Please register first."
+      });
+    }
+    
+    const user_id = userResult.rows[0].id;
+    
+    // Check if user has already voted for this property
+    const existingVote = await db.query(
+      "SELECT * FROM votes WHERE user_id = $1 AND property_id = $2",
+      [user_id, property_id]
+    );
+    
+    if (existingVote.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: "You have already voted for this property"
+      });
+    }
+    
+    const result = await db.query(
+      "INSERT INTO votes (user_id, property_id, vote_option_id) VALUES ($1, $2, $3) RETURNING *",
+      [user_id, property_id, vote_option_id]
+    );
+    
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message: "Vote recorded successfully"
+    });
+  } catch (error) {
+    console.error("Error creating vote:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to create vote",
+      message: error.message
+    });
+  }
+});
+
+// =============================================================================
+// VOTE OPTIONS ROUTES (READ-ONLY)
+// =============================================================================
+
+// GET all vote options
+app.get("/vote_options", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT vo.*, c.name as category_name
+      FROM vote_options vo
+      JOIN categories c ON vo.category_id = c.id
+      ORDER BY c.name, vo.name
+    `);
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    console.error("Error fetching vote options:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch vote options",
+      message: error.message
+    });
+  }
+});
+
+// GET vote options by category ID
+app.get("/vote_options/category/:categoryId", async (req, res) => {
+  try {
+    const { categoryId } = req.params;
+    const result = await db.query(
+      "SELECT * FROM vote_options WHERE category_id = $1 ORDER BY name",
+      [categoryId]
+    );
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    console.error("Error fetching vote options for category:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch vote options",
+      message: error.message
+    });
+  }
+});
 
 // =============================================================================
 // ANALYTICS AND STATISTICS ROUTES
@@ -200,24 +807,26 @@ app.use("/api/auth", (req, res, next) => {
 // GET vote statistics for a property
 app.get("/properties/:id/stats", async (req, res) => {
   try {
-    const { id } = req.params
+    const { id } = req.params;
     
     const result = await db.query(`
       SELECT 
-        vo.option_text,
+        vo.name as option_name,
         vo.id as vote_option_id,
         COUNT(v.id) as vote_count,
         ROUND(COUNT(v.id) * 100.0 / NULLIF(SUM(COUNT(v.id)) OVER(), 0), 2) as percentage
       FROM vote_options vo
       LEFT JOIN votes v ON vo.id = v.vote_option_id AND v.property_id = $1
-      GROUP BY vo.id, vo.option_text
+      JOIN properties p ON p.id = $1
+      WHERE vo.category_id = p.category_id
+      GROUP BY vo.id, vo.name
       ORDER BY vote_count DESC
-    `, [id])
+    `, [id]);
     
     const totalVotes = await db.query(
       "SELECT COUNT(*) as total FROM votes WHERE property_id = $1",
       [id]
-    )
+    );
     
     res.json({
       success: true,
@@ -225,24 +834,24 @@ app.get("/properties/:id/stats", async (req, res) => {
         statistics: result.rows,
         total_votes: parseInt(totalVotes.rows[0].total)
       }
-    })
+    });
   } catch (error) {
-    console.error("Error fetching property statistics:", error)
+    console.error("Error fetching property statistics:", error);
     res.status(500).json({
       success: false,
       error: "Failed to fetch property statistics",
       message: error.message
-    })
+    });
   }
-})
+});
 
 // GET overall platform statistics
 app.get("/stats", async (req, res) => {
   try {
-    const userCount = await db.query("SELECT COUNT(*) as count FROM users")
-    const propertyCount = await db.query("SELECT COUNT(*) as count FROM properties")
-    const voteCount = await db.query("SELECT COUNT(*) as count FROM votes")
-    const imageCount = await db.query("SELECT COUNT(*) as count FROM property_images")
+    const userCount = await db.query("SELECT COUNT(*) as count FROM users");
+    const propertyCount = await db.query("SELECT COUNT(*) as count FROM properties");
+    const voteCount = await db.query("SELECT COUNT(*) as count FROM votes");
+    const imageCount = await db.query("SELECT COUNT(*) as count FROM property_images");
     
     const recentActivity = await db.query(`
       SELECT 'vote' as type, created_at, user_id, property_id FROM votes
@@ -250,7 +859,7 @@ app.get("/stats", async (req, res) => {
       SELECT 'property' as type, created_at, user_id, id as property_id FROM properties
       ORDER BY created_at DESC
       LIMIT 10
-    `)
+    `);
     
     res.json({
       success: true,
@@ -261,16 +870,70 @@ app.get("/stats", async (req, res) => {
         total_images: parseInt(imageCount.rows[0].count),
         recent_activity: recentActivity.rows
       }
-    })
+    });
   } catch (error) {
-    console.error("Error fetching platform statistics:", error)
+    console.error("Error fetching platform statistics:", error);
     res.status(500).json({
       success: false,
       error: "Failed to fetch platform statistics",
       message: error.message
-    })
+    });
   }
-})
+});
+
+// =============================================================================
+// PROPERTY IMAGES ROUTES
+// =============================================================================
+
+// Mount the property_images router
+app.use("/property_images", propertyImagesRouter);
+
+// =============================================================================
+// ADDITIONAL API ROUTES WITH /api PREFIX
+// =============================================================================
+
+// Add /api prefix routes for all endpoints
+app.use("/api/users", (req, res, next) => {
+  req.url = req.url.replace('/api/users', '/users');
+  req.originalUrl = req.originalUrl.replace('/api/users', '/users');
+  next();
+});
+
+app.use("/api/properties", (req, res, next) => {
+  req.url = req.url.replace('/api/properties', '/properties');
+  req.originalUrl = req.originalUrl.replace('/api/properties', '/properties');
+  next();
+});
+
+app.use("/api/votes", (req, res, next) => {
+  req.url = req.url.replace('/api/votes', '/votes');
+  req.originalUrl = req.originalUrl.replace('/api/votes', '/votes');
+  next();
+});
+
+app.use("/api/property_images", (req, res, next) => {
+  req.url = req.url.replace('/api/property_images', '/property_images');
+  req.originalUrl = req.originalUrl.replace('/api/property_images', '/property_images');
+  next();
+});
+
+app.use("/api/categories", (req, res, next) => {
+  req.url = req.url.replace('/api/categories', '/categories');
+  req.originalUrl = req.originalUrl.replace('/api/categories', '/categories');
+  next();
+});
+
+app.use("/api/vote_options", (req, res, next) => {
+  req.url = req.url.replace('/api/vote_options', '/vote_options');
+  req.originalUrl = req.originalUrl.replace('/api/vote_options', '/vote_options');
+  next();
+});
+
+app.use("/api/auth", (req, res, next) => {
+  req.url = req.url.replace('/api/auth', '/auth');
+  req.originalUrl = req.originalUrl.replace('/api/auth', '/auth');
+  next();
+});
 
 // 404 handler for API routes
 app.use(["/api/*"], (req, res) => {
@@ -291,808 +954,35 @@ app.use(["/api/*"], (req, res) => {
       "GET /properties/:id/stats",
       "GET /stats"
     ]
-  })
-})
+  });
+});
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Server Error:', err.stack)
+  console.error('Server Error:', err.stack);
   res.status(500).json({
     error: "Internal Server Error",
     message: "Something went wrong",
-  })
-})
+  });
+});
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  const liveUrl = 'https://mipripity-web.onrender.com'
-  console.log(`🚀 Server running on Render at ${liveUrl}`)
-  console.log(`🌍 Environment: production`)
-  console.log(`🗄️  Database: ${process.env.DB_HOST}`)
-  console.log(`🔗 Health check: ${liveUrl}/health`)
-  console.log(`📖 API docs: ${liveUrl}/`)
-  console.log(`🏠 Available routes:`)
-  console.log(`   - Users: ${liveUrl}/users`)
-  console.log(`   - Properties: ${liveUrl}/properties`)
-  console.log(`   - Votes: ${liveUrl}/votes`)
-  console.log(`   - Property Images: ${liveUrl}/property_images`)
-  console.log(`   - Categories: ${liveUrl}/categories`)
-  console.log(`   - Vote Options: ${liveUrl}/vote_options`)
-  console.log(`   - Auth: ${liveUrl}/auth/login, ${liveUrl}/auth/register`)
-  console.log(`   - Statistics: ${liveUrl}/stats, ${liveUrl}/properties/:id/stats`)
-})
+  const liveUrl = 'https://mipripity-web.onrender.com';
+  console.log(`🚀 Server running on Render at ${liveUrl}`);
+  console.log(`🌍 Environment: production`);
+  console.log(`🗄️  Database: ${process.env.DB_HOST}`);
+  console.log(`🔗 Health check: ${liveUrl}/health`);
+  console.log(`📖 API docs: ${liveUrl}/`);
+  console.log(`🏠 Available routes:`);
+  console.log(`   - Users: ${liveUrl}/users`);
+  console.log(`   - Properties: ${liveUrl}/properties`);
+  console.log(`   - Votes: ${liveUrl}/votes`);
+  console.log(`   - Property Images: ${liveUrl}/property_images`);
+  console.log(`   - Categories: ${liveUrl}/categories`);
+  console.log(`   - Vote Options: ${liveUrl}/vote_options`);
+  console.log(`   - Auth: ${liveUrl}/auth/login, ${liveUrl}/auth/register`);
+  console.log(`   - Statistics: ${liveUrl}/stats, ${liveUrl}/properties/:id/stats`);
+});
 
-module.exports = app
-    console.error("Error fetching users:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch users",
-      message: error.message
-    })
-
-// GET user by ID
-app.get("/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const result = await db.query("SELECT * FROM users WHERE id = $1", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0]
-    })
-  } catch (error) {
-    console.error("Error fetching user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch user",
-      message: error.message
-    })
-  }
-})
-
-// POST create new user
-app.post("/users", async (req, res) => {
-  try {
-    const { name, email, password, phone } = req.body
-    
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        error: "Name, email, and password are required"
-      })
-    }
-    
-    const result = await db.query(
-      "INSERT INTO users (name, email, password, phone) VALUES ($1, $2, $3, $4) RETURNING *",
-      [name, email, password, phone]
-    )
-    
-    res.status(201).json({
-      success: true,
-      data: result.rows[0],
-      message: "User created successfully"
-    })
-  } catch (error) {
-    console.error("Error creating user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to create user",
-      message: error.message
-    })
-  }
-})
-
-// PUT/PATCH update user
-app.put("/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const { name, email, password, phone } = req.body
-    
-    const result = await db.query(
-      "UPDATE users SET name = COALESCE($1, name), email = COALESCE($2, email), password = COALESCE($3, password), phone = COALESCE($4, phone), updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *",
-      [name, email, password, phone, id]
-    )
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "User updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update user",
-      message: error.message
-    })
-  }
-})
-
-app.patch("/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const updates = req.body
-    
-    const setClause = Object.keys(updates).map((key, index) => `${key} = $${index + 1}`).join(', ')
-    const values = Object.values(updates)
-    values.push(id)
-    
-    const query = `UPDATE users SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING *`
-    
-    const result = await db.query(query, values)
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "User updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update user",
-      message: error.message
-    })
-  }
-})
-
-// DELETE user
-app.delete("/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    
-    const result = await db.query("DELETE FROM users WHERE id = $1 RETURNING *", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "User deleted successfully"
-    })
-  } catch (error) {
-    console.error("Error deleting user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete user",
-      message: error.message
-    })
-  }
-})
-
-// =============================================================================
-// PROPERTIES ROUTES
-// =============================================================================
-
-// GET all properties
-app.get("/properties", async (req, res) => {
-  try {
-    const result = await db.query(`
-      SELECT p.*, u.name as owner_name, c.name as category_name 
-      FROM properties p 
-      LEFT JOIN users u ON p.user_id = u.id 
-      LEFT JOIN categories c ON p.category_id = c.id 
-      ORDER BY p.created_at DESC
-    `)
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching properties:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch properties",
-      message: error.message
-    })
-  }
-})
-
-// GET property by ID
-app.get("/properties/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const result = await db.query(`
-      SELECT p.*, u.name as owner_name, c.name as category_name 
-      FROM properties p 
-      LEFT JOIN users u ON p.user_id = u.id 
-      LEFT JOIN categories c ON p.category_id = c.id 
-      WHERE p.id = $1
-    `, [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0]
-    })
-  } catch (error) {
-    console.error("Error fetching property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch property",
-      message: error.message
-    })
-  }
-})
-
-// POST create new property
-app.post("/properties", async (req, res) => {
-  try {
-    const { title, description, location, price, user_id, category_id, bedrooms, bathrooms, square_feet } = req.body
-    
-    if (!title || !description || !location || !price || !user_id) {
-      return res.status(400).json({
-        success: false,
-        error: "Title, description, location, price, and user_id are required"
-      })
-    }
-    
-    const result = await db.query(
-      "INSERT INTO properties (title, description, location, price, user_id, category_id, bedrooms, bathrooms, square_feet) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
-      [title, description, location, price, user_id, category_id, bedrooms, bathrooms, square_feet]
-    )
-    
-    res.status(201).json({
-      success: true,
-      data: result.rows[0],
-      message: "Property created successfully"
-    })
-  } catch (error) {
-    console.error("Error creating property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to create property",
-      message: error.message
-    })
-  }
-})
-
-// PUT update property
-app.put("/properties/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const { title, description, location, price, category_id, bedrooms, bathrooms, square_feet } = req.body
-    
-    const result = await db.query(
-      "UPDATE properties SET title = COALESCE($1, title), description = COALESCE($2, description), location = COALESCE($3, location), price = COALESCE($4, price), category_id = COALESCE($5, category_id), bedrooms = COALESCE($6, bedrooms), bathrooms = COALESCE($7, bathrooms), square_feet = COALESCE($8, square_feet), updated_at = CURRENT_TIMESTAMP WHERE id = $9 RETURNING *",
-      [title, description, location, price, category_id, bedrooms, bathrooms, square_feet, id]
-    )
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Property updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update property",
-      message: error.message
-    })
-  }
-})
-
-// PATCH update property
-app.patch("/properties/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const updates = req.body
-    
-    const setClause = Object.keys(updates).map((key, index) => `${key} = $${index + 1}`).join(', ')
-    const values = Object.values(updates)
-    values.push(id)
-    
-    const query = `UPDATE properties SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING *`
-    
-    const result = await db.query(query, values)
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Property updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update property",
-      message: error.message
-    })
-  }
-})
-
-// DELETE property
-app.delete("/properties/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    
-    const result = await db.query("DELETE FROM properties WHERE id = $1 RETURNING *", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Property deleted successfully"
-    })
-  } catch (error) {
-    console.error("Error deleting property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete property",
-      message: error.message
-    })
-  }
-})
-
-// =============================================================================
-// VOTES ROUTES
-// =============================================================================
-
-// GET all votes
-app.get("/votes", async (req, res) => {
-  try {
-    const result = await db.query(`
-      SELECT v.*, u.name as voter_name, p.title as property_title, vo.option_text as vote_option_text 
-      FROM votes v 
-      LEFT JOIN users u ON v.user_id = u.id 
-      LEFT JOIN properties p ON v.property_id = p.id 
-      LEFT JOIN vote_options vo ON v.vote_option_id = vo.id 
-      ORDER BY v.created_at DESC
-    `)
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching votes:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch votes",
-      message: error.message
-    })
-  }
-})
-
-// GET votes by property ID
-app.get("/votes/property/:propertyId", async (req, res) => {
-  try {
-    const { propertyId } = req.params
-    const result = await db.query(`
-      SELECT v.*, u.name as voter_name, vo.option_text as vote_option_text 
-      FROM votes v 
-      LEFT JOIN users u ON v.user_id = u.id 
-      LEFT JOIN vote_options vo ON v.vote_option_id = vo.id 
-      WHERE v.property_id = $1 
-      ORDER BY v.created_at DESC
-    `, [propertyId])
-    
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching votes for property:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch votes for property",
-      message: error.message
-    })
-  }
-})
-
-// GET votes by user ID
-app.get("/votes/user/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params
-    const result = await db.query(`
-      SELECT v.*, p.title as property_title, vo.option_text as vote_option_text 
-      FROM votes v 
-      LEFT JOIN properties p ON v.property_id = p.id 
-      LEFT JOIN vote_options vo ON v.vote_option_id = vo.id 
-      WHERE v.user_id = $1 
-      ORDER BY v.created_at DESC
-    `, [userId])
-    
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching votes for user:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch votes for user",
-      message: error.message
-    })
-  }
-})
-
-// POST create new vote
-app.post("/votes", async (req, res) => {
-  try {
-    const { user_id, property_id, vote_option_id, comment } = req.body
-    
-    if (!user_id || !property_id || !vote_option_id) {
-      return res.status(400).json({
-        success: false,
-        error: "User ID, property ID, and vote option ID are required"
-      })
-    }
-    
-    // Check if user has already voted for this property
-    const existingVote = await db.query(
-      "SELECT * FROM votes WHERE user_id = $1 AND property_id = $2",
-      [user_id, property_id]
-    )
-    
-    if (existingVote.rows.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: "User has already voted for this property"
-      })
-    }
-    
-    const result = await db.query(
-      "INSERT INTO votes (user_id, property_id, vote_option_id, comment) VALUES ($1, $2, $3, $4) RETURNING *",
-      [user_id, property_id, vote_option_id, comment]
-    )
-    
-    res.status(201).json({
-      success: true,
-      data: result.rows[0],
-      message: "Vote created successfully"
-    })
-  } catch (error) {
-    console.error("Error creating vote:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to create vote",
-      message: error.message
-    })
-  }
-})
-
-// PUT update vote
-app.put("/votes/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const { vote_option_id, comment } = req.body
-    
-    const result = await db.query(
-      "UPDATE votes SET vote_option_id = COALESCE($1, vote_option_id), comment = COALESCE($2, comment), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *",
-      [vote_option_id, comment, id]
-    )
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Vote not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Vote updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating vote:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update vote",
-      message: error.message
-    })
-  }
-})
-
-// DELETE vote
-app.delete("/votes/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    
-    const result = await db.query("DELETE FROM votes WHERE id = $1 RETURNING *", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Vote not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Vote deleted successfully"
-    })
-  } catch (error) {
-    console.error("Error deleting vote:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete vote",
-      message: error.message
-    })
-  }
-})
-
-// =============================================================================
-// PROPERTY IMAGES ROUTES
-// =============================================================================
-
-// GET all property images
-app.get("/property_images", async (req, res) => {
-  try {
-    const result = await db.query(`
-      SELECT pi.*, p.title as property_title 
-      FROM property_images pi 
-      LEFT JOIN properties p ON pi.property_id = p.id 
-      ORDER BY pi.created_at DESC
-    `)
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching property images:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch property images",
-      message: error.message
-    })
-  }
-})
-
-// GET property images by property ID
-app.get("/property_images/property/:propertyId", async (req, res) => {
-  try {
-    const { propertyId } = req.params
-    const result = await db.query(
-      "SELECT * FROM property_images WHERE property_id = $1 ORDER BY created_at DESC",
-      [propertyId]
-    )
-    
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching property images:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch property images",
-      message: error.message
-    })
-  }
-})
-
-// GET property image by ID
-app.get("/property_images/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const result = await db.query(
-      "SELECT * FROM property_images WHERE id = $1",
-      [id]
-    )
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property image not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0]
-    })
-  } catch (error) {
-    console.error("Error fetching property image:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch property image",
-      message: error.message
-    })
-  }
-})
-
-// POST create new property image
-app.post("/property_images", async (req, res) => {
-  try {
-    const { property_id, image_url, alt_text, is_primary } = req.body
-    
-    if (!property_id || !image_url) {
-      return res.status(400).json({
-        success: false,
-        error: "Property ID and image URL are required"
-      })
-    }
-    
-    const result = await db.query(
-      "INSERT INTO property_images (property_id, image_url, alt_text, is_primary) VALUES ($1, $2, $3, $4) RETURNING *",
-      [property_id, image_url, alt_text, is_primary || false]
-    )
-    
-    res.status(201).json({
-      success: true,
-      data: result.rows[0],
-      message: "Property image created successfully"
-    })
-  } catch (error) {
-    console.error("Error creating property image:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to create property image",
-      message: error.message
-    })
-  }
-})
-
-// PUT update property image
-app.put("/property_images/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const { image_url, alt_text, is_primary } = req.body
-    
-    const result = await db.query(
-      "UPDATE property_images SET image_url = COALESCE($1, image_url), alt_text = COALESCE($2, alt_text), is_primary = COALESCE($3, is_primary), updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *",
-      [image_url, alt_text, is_primary, id]
-    )
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property image not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Property image updated successfully"
-    })
-  } catch (error) {
-    console.error("Error updating property image:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to update property image",
-      message: error.message
-    })
-  }
-})
-
-// DELETE property image
-app.delete("/property_images/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    
-    const result = await db.query("DELETE FROM property_images WHERE id = $1 RETURNING *", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Property image not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: "Property image deleted successfully"
-    })
-  } catch (error) {
-    console.error("Error deleting property image:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete property image",
-      message: error.message
-    })
-  }
-})
-
-// =============================================================================
-// CATEGORIES ROUTES (READ-ONLY)
-// =============================================================================
-
-// GET all categories
-app.get("/categories", async (req, res) => {
-  try {
-    const result = await db.query("SELECT * FROM categories ORDER BY name ASC")
-    res.json({
-      success: true,
-      data: result.rows,
-      count: result.rows.length
-    })
-  } catch (error) {
-    console.error("Error fetching categories:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch categories",
-      message: error.message
-    })
-  }
-})
-
-// GET category by ID
-app.get("/categories/:id", async (req, res) => {
-  try {
-    const { id } = req.params
-    const result = await db.query("SELECT * FROM categories WHERE id = $1", [id])
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Category not found"
-      })
-    }
-    
-    res.json({
-      success: true,
-      data: result.rows[0]
-    })
-  } catch (error) {
-    console.error("Error fetching category:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch category",
-      message: error.message
-    })
-  }
-})
+module.exports = app;
